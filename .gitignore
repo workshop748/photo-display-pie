@@ -23,3 +23,4 @@ photo_display/rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 Test_scripts/*
+a1_uploads/*
