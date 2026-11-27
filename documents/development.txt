@@ -1,0 +1,288 @@
+LINEAGE SECURITY LABS
+Product: Pi Photo Frame (name TBD)
+Docs: PRD + FRS (working draft)
+Owner: Jacob Peacy
+Version: 0.5 | Updated: 2026-11-25
+Target: MVP by 2026-12-25
+SD 128 gb
+Legend:
+  [OK]   done
+  [FIX]  needs a change before it's final
+  [Q]    question you need to answer
+  [TODO] not started
+
+Scenarios referenced (from the ConOps):
+  S1 Upload | S2 Power loss | S3 Storage full
+  S4 Curate | S5 Unauthorized access
+  S6 Remote maintenance
+
+==================================================
+PRODUCT REQUIREMENTS (PRD)
+==================================================
+
+1. PURPOSE  [OK]
+A heartfelt gift that Eryss will love and use for a
+long time. Because it is meant for long use, it has to
+be reliable.
+
+2. SUCCESS MOMENT  [OK]
+Developer acceptance test:
+  Jacob logs in, uploads several photos, and sees them
+  shown on the monitor as an authenticated user.
+Customer moment:
+  On December 25, Eryss opens the gift, logs in to the
+  device from her phone, and uploads an image that is
+  displayed within 5 minutes.
+
+3. GOALS  [OK]
+G1 (S1) Upload and display a photo from a phone; the
+  photo shall be displayed within 5 minutes.
+G2 (S2) When a power outage occurs, the device
+  remembers the last image. When power is restored,
+  the last image shall be presented within 10 minutes.
+G3 (S5) Images shall only be changed by logged-in
+  users once they have fully authenticated.
+
+4. MVP FEATURES (must work by Dec 25)  [OK]
+- Log in to the upload page
+- Upload images
+- Rotate images on a default or user-set timer
+- On boot, the slideshow starts right away on the
+  last displayed image
+- Shuffle (random order)
+- Hide / remove photos
+- SSH fix path over WireGuard (S6)
+
+5. V2 (after Dec 25)  [OK]
+- Update chain (CI/CD over-the-air updates)
+- Monitor speaker / music station support
+- Backup of images and configuration
+- Optimized recovery
+- Other user access / admin roles
+- Priority images
+- HTTPS (see AR-1)
+- Login and heartbeat notifications; email + reboot
+  if WireGuard is down (former R23)
+- HEIC conversion on the Pi (only if A-1 fails)
+- Encrypted photo storage using the Pi 5's
+  device-unique OTP key + secure boot (see AR-2)
+
+6. SUCCESS CRITERIA  [OK]
+C1 -> G1 (S1): Connect to the device's upload page,
+  upload an image, and have it displayed in under
+  5 minutes.
+C2 -> G2 (S2): During the image rotation, unplug the
+  power and wait 10 seconds. Plug it back in; the
+  device boots and returns to the last image within
+  10 minutes.
+C3 -> G3 (S5): Go to the upload page as a user who
+  isn't logged in, try to upload an image, and
+  confirm the image was not uploaded.
+
+==================================================
+TECH STACK (decided)
+==================================================
+- App: Rust + Axum, behind Nginx (reverse proxy)
+- Images: Rust `image` crate (decode/re-encode)
+- Build: cross-compile to aarch64 on the
+  workstation (cross or cargo-zigbuild)
+- OS: RHEL-family. AlmaLinux supports the Pi 5.
+  [Q] Which Pi model? Confirms the OS choice.
+
+==================================================
+THREAT MODEL (lightweight)
+==================================================
+Data flow:
+  Phone -> home Wi-Fi -> Nginx -> Axum app
+  -> SD card -> display
+
+Trust boundaries (where untrusted data crosses):
+  TB-1 Network: anything from the Wi-Fi is
+       untrusted. Nginx passes upload bytes through
+       unchanged, so uploads stay untrusted until the
+       Axum app validates them.
+       Covered by: R1, R2, R5a-c, R17-R19, AR-1
+  TB-2 Physical: someone holding the SD card.
+       Covered by: R15, AR-2, disposal procedure
+  TB-3 Admin: WireGuard + SSH (authenticated).
+       Covered by: R21, R22
+
+==================================================
+FUNCTIONAL REQUIREMENTS (FRS)
+==================================================
+
+Format:
+  ID | from S# | shall/should | requirement | verify by
+
+--- S1 UPLOAD ---
+R1 | S1 | shall | Accept PNG and JPEG only, decided by
+   file contents (magic bytes), not by extension.
+   Deny any other file, including HEIC.
+   Verify: rename a .txt to .jpg; upload a .gif;
+   upload a .heic file.  [OK]
+
+ASSUMPTION A-1 (iPhone uploads)
+  Eryss and Jacob both use iPhones (HEIC by default).
+  We assume iPhone Safari converts HEIC to JPEG when
+  it uploads to a page that only accepts JPEG/PNG.
+  Test early: the Photos picker, the Files app, and a
+  photo AirDropped to a laptop.
+  If it fails: HEIC conversion moves from v2 into the
+  MVP (one more untrusted-file parser to keep
+  updated).
+  Status: [TODO] not yet tested
+
+R2 | S1 | shall | Reject files larger than 25 MB.
+   Verify: test with an oversized file  [OK]
+R3 | S1 | shall | On success, show "Upload successful"
+   and show the photo in the queue.
+   Verify: demo  [OK]
+R4 | S1 | shall | Display a newly uploaded photo
+   within 5 minutes.
+   Verify: timed test  [OK]
+R5a | S1 | shall | Decode and re-encode uploaded
+    images and strip all metadata before storage.
+    Verify: upload a photo with GPS data; run
+    exiftool on the stored file and confirm no GPS or
+    EXIF data remains.  [OK]
+R5b | S1 | shall | Give stored files server-created
+    names; ignore the name the uploader sent.
+    Verify: upload a file named
+    ../../var/www/html/shell.php.jpg and confirm it
+    lands only in the upload folder under a random
+    name, and nothing is written anywhere else.  [OK]
+R5c | S1 | shall | Store photos outside the web root.
+    Verify: inspect the Nginx config and the storage
+    path; request a stored photo by guessing its URL
+    and confirm a 404.  [OK]
+R6 | S1 | shall | Show the error "File type
+   unsupported" when an unsupported file is uploaded.
+   Verify: upload a wrong file type; confirm the
+   message appears and nothing is stored.  [OK]
+
+--- S2 POWER LOSS ---
+R7 | S2 | shall | Start the slideshow full-screen on
+   boot with no user action.
+   Verify: power-cycle test  [OK]
+R8 | S2 | shall | Resume on the last displayed image
+   within 10 minutes of power being restored.
+   Verify: note the image, pull the plug, check  [OK]
+R9 | S2 | shall | Keep photos and settings intact
+   after power loss, including during an upload.
+   Verify: pull the plug mid-upload  [OK]
+
+--- S3 STORAGE FULL ---
+R10 | S3 | shall | Limit photo storage to 75% of the
+    device's total storage, measured at runtime.
+    Verify: test on a small SD card  [OK]
+R11 | S3 | shall | Reject uploads past that limit and
+    show "Storage full. Remove photos to make room."
+    Verify: fill storage, then upload  [OK]
+R12 | S3 | shall | If an upload fails partway, delete
+    the partial file and show "Upload unable to
+    finish."
+    Verify: cut Wi-Fi mid-upload  [OK]
+
+--- S4 CURATE ---
+R13 | S4 | shall | Default display time is 45 seconds.
+    The user can set 15-90 seconds per photo.
+    Verify: demo + test out-of-range values  [OK]
+R14 | S4 | shall | Hide keeps the photo on the device
+    but out of rotation. Unhide restores it.
+    Verify: demo  [OK]
+R15 | S4 | shall | Remove deletes the photo from the
+    device, with TRIM enabled on the photo storage
+    (discard mount option or a scheduled fstrim).
+    Verify: remove a photo; confirm it is gone from
+    the queue and storage; inspect mount options or
+    the fstrim timer.  [OK]
+
+ACCEPTED RISK AR-2 (MVP)
+  Someone holding the SD card may recover deleted
+  photos. Overwriting doesn't work on flash (wear
+  leveling), and encryption doesn't help when the key
+  must live on the same card for unattended boot
+  (R7) and the Pi has no TPM.
+  Mitigation: TRIM (R15) + disposal procedure: when
+  the card is retired, physically destroy it.
+  Revisit: v2 (OTP key + secure boot encryption).
+
+R16 | S4 | shall | Shuffle can be turned on or off.
+    Repeats are allowed.
+    Verify: demo  [OK]
+
+--- S5 UNAUTHORIZED ACCESS ---
+R17 | S5 | shall | Require login before any upload,
+    hide, remove or settings change.
+    Verify: send requests without logging in  [OK]
+R18 | S5 | shall | Lock out login after 4 failed
+    attempts for 5 minutes.
+    Verify: fail 4 logins; confirm the 5th is blocked
+    even with the right password; retry after 5 min.
+    [OK]
+R19 | S5 | shall | End the session after 15 minutes
+    with no activity, except during an upload.
+    Verify: timed test  [OK]
+R20 | S5 | should | Log every login and failed login
+    to a file Jacob can read over SSH.
+    Verify: log in, fail a login, read the log  [OK]
+
+ACCEPTED RISK AR-1 (MVP)
+  The login page runs over HTTP on the home network.
+  Someone on the same Wi-Fi could capture the
+  password.
+  Why accepted: deadline; no self-signed certs.
+  Mitigation: Eryss uses a unique password used
+  nowhere else.
+  Revisit: v2 (HTTPS).
+
+--- S6 REMOTE MAINTENANCE ---
+R21 | S6 | shall | SSH is reachable only through
+    WireGuard.
+    Verify: port scan from the LAN and the internet
+    [OK]
+R22 | S6 | shall | Harden SSH with these settings,
+    drawn from the RHEL 9 STIG (used as a baseline,
+    not a compliance claim):
+    - PermitRootLogin no (V-257985)
+    - PermitEmptyPasswords no (V-257984)
+    - PubkeyAuthentication yes (V-257983)
+    - AuthenticationMethods publickey,password
+      (key AND password required)
+    - ListenAddress <WireGuard IP> (enforces R21)
+    - AllowUsers <admin user>
+    Verify: inspect sshd_config; try root login,
+    password-only login and key-only login; all must
+    fail.  [OK]
+
+==================================================
+OPEN DECISIONS
+==================================================
+[x] App behind Nginx: Rust + Axum
+[x] "Display all events": cut (no scenario)
+[x] Upload size limit: 25 MB (R2)
+[x] HEIC: rely on Safari conversion, test it (A-1)
+[x] Lockout: 4 attempts, 5 minutes (R18)
+[x] Session timeout: 15 minutes (R19)
+[x] Remove: delete + TRIM, AR-2 (R15)
+[x] SSH controls (R22)
+[ ] Pi model raspberry pi 4 series b-> confirms AlmaLinux vs Fedora
+[ ] Recovery: keep a cloned SD card image as the MVP
+    recovery path?
+[ ] Maintenance: who updates the OS and Rust
+    dependencies after Dec 25, and how often?
+
+==================================================
+BUILD CHECKPOINTS
+==================================================
+[ ] Test assumption A-1 with a bare upload page on
+    Jacob's iPhone (do this first; it can change
+    scope)
+[ ] Pi boots into a full-screen slideshow of a local
+    folder
+[ ] Upload page behind a login (Nginx + Axum)
+[ ] Display timer setting
+[ ] Power-cycle test passes (G2)
+[ ] Unauthenticated-upload test passes (G3)
+[ ] Developer acceptance test passes
+[ ] SD card image cloned as the recovery copy
